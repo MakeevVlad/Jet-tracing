@@ -10,7 +10,7 @@ from astropy.utils.data import get_pkg_data_filename
 from astropy.io import fits
 from astropy.wcs import WCS
 import scipy.interpolate as spi
-
+import os
 
 
 
@@ -72,6 +72,16 @@ def map_noise(data, ratio=0.124):
     s3 = np.std(data[trigm-trig:trigm+1, :trig].ravel())
     s4 = np.std(data[trigm-trig:trigm+1, trigm-trig:trigm+1].ravel())
     return np.median([s1, s2, s3, s4])
+
+def map_noise_mean(data, ratio=0.124):
+    data = np.array(data)
+    trig = int(np.floor(len(data)*ratio))
+    trigm = len(data) - 1
+    s1 = np.mean(data[:trig, :trig].ravel())
+    s2 = np.mean(data[:trig, trigm-trig:trigm+1].ravel())
+    s3 = np.mean(data[trigm-trig:trigm+1, :trig].ravel())
+    s4 = np.mean(data[trigm-trig:trigm+1, trigm-trig:trigm+1].ravel())
+    return np.mean([s1, s2, s3, s4])
 
 #returns coordinates of the map centre (the brightest point)
 def map_center(data):
@@ -494,17 +504,9 @@ def gauss_like_width(data, pos):
 def low_res_map_check(fits_file):
     return 1
 
-def twoD_gauss(x, y, A, sigma_x, sigma_y, x_0, y_0, angle):
-    x -= x_0
-    y -= y_0
-    angle*= np.pi/180
-    angle -= 0.5*np.pi
-    x_ = -(x)*np.cos(angle) + (y)*np.sin(angle)
-    y_ = x*np.sin(angle) + y*np.cos(angle)
-    return A * np.exp( -1 * ( ((x_) / sigma_x)**2 + ((y_) / sigma_y)**2 ) )
 
-def oneD_gauss(x, A, sigma, x_0):
-    return A * np.exp(-0.5 * ((x - x_0) / sigma)**2 )
+
+
 
 def stop_function(data, pos, noise_lvl, roughness=2, size=0.05):
     x = np.arange( pos[0] - int(0.5*size*len(data)), pos[0] + int(0.5*size*len(data)), 1)
@@ -631,20 +633,100 @@ def ellipse_clean(data, center, a, b, angle, value=0):
                 data[x, y] = value
     return data
 
+def twoD_gauss(x, y, A, sigma_x, sigma_y, x_0, y_0, angle):
+    x -= x_0
+    y -= y_0
+    angle*= np.pi/180
+    angle -= 0.5*np.pi
+    x_ = -(x)*np.cos(angle) + (y)*np.sin(angle)
+    y_ = x*np.sin(angle) + y*np.cos(angle)
+    return A * np.exp( -1 * ( ((x_) / sigma_x)**2 + ((y_) / sigma_y)**2 ) )
 
+VtwoD_gauss = np.vectorize(twoD_gauss)
+
+def oneD_gauss(x, A, a, x_0):
+    return A * np.exp(-((x - x_0) * a)**2 )
+from time import time
 def gauss_clean(data, center, sx, sy, angle):
-    Jm = np.amax(data)
-    for x in np.arange(0, len(data), 1):
-        for y in np.arange(0, len(data), 1):
-            data[x, y] -= twoD_gauss(x, y, Jm, sx * 1.2, sy * 1.2, center[0], center[1], angle)
-        print(x)
-    return data
+    N = len(data)
+    bpa = angle
+    ydata_0 = data[np.arange(0, N), center[1]]
+    xdata_0 = np.arange(0, len(data), 1)
 
-def is_blamba(fits_file):
+    adg_0 = lambda x, A, a: oneD_gauss(x, A, a, x_0 = center[0])
+    
+    xdata_1 = data[center[1], np.arange(0, N)]
+    ydata_1 = np.arange(0, len(data), 1)
+
+    adg_1 = lambda x, A, a: oneD_gauss(x, A, a, x_0 = center[1])
+    #adv_f = lambda x, A, sigma_x, sigma_y: twoD_gauss(x=x, 
+    #y=center[1], A=A, sigma_x=sigma_x, sigma_y=sigma_y, x_0=center[0], y_0=center[1], angle=angle)
+
+    angle*= np.pi/180
+    angle -= 0.5*np.pi
+
+    popt0, pcov0 = so.curve_fit(oneD_gauss, xdata = xdata_0, ydata = ydata_0, bounds = [[-np.inf, -np.inf, center[0]*0.9], [np.inf, np.inf, center[0]*1.1]])
+    popt1, pcov1 = so.curve_fit(oneD_gauss, xdata = ydata_1, ydata = xdata_1, bounds = [[-np.inf, -np.inf, center[1]*0.9], [np.inf, np.inf, center[1]*1.1]])
+    #
+
+    A = (popt1[0] + popt0[0])*0.5
+    a, b = popt0[1]**2, popt1[1]**2
+    s_x = np.sqrt((1 - 2*np.sin(angle)**2)/(a - (a + b)*np.sin(angle)**2))
+    s_y = np.sqrt((1 - 2*np.sin(angle)**2)/(b - (a + b)*np.sin(angle)**2))
+    x_0 = popt0[2]
+    y_0 = popt1[2]
+    Jm = np.amax(data)
+    #data*=0
+
+    for y in np.arange(0, len(data), 1):
+        data[:, y] -= VtwoD_gauss(np.arange(0, len(data), 1), y, A, s_x, s_y, x_0, y_0, bpa)
+        #data[x, y] -= twoD_gauss(x, y, Jm, sx * 1.2, sy * 1.2, center[0], center[1], angle)
+        #print(x) 
+
+    return [data, [A, s_x, s_y, x_0, y_0]]
+
+def integrate_map(data):
+    a = 0
+    for x in np.arange(0, len(data)):
+        a+= np.cumsum(data[x, np.arange(0, len(data))]**2)
+    return a[-1]
+def asimmertry(data):
+    sigma = np.std(data.ravel())
+    cmmnt3 = np.mean((data.ravel() - np.mean(data.ravel()))**3) 
+    return cmmnt3/sigma**3
+asymmetry = np.vectorize(asimmertry)
+
+def map_flux_ratio(data, sigma, n):
+    ratio1 = np.cumsum(data[data>=n*sigma].ravel())[-1]/np.cumsum(data.ravel())[-1]
+    ratio2 = data[data>=n*sigma].size/(data.size)
+
+    return [ratio1, ratio2]
+
+def gauss_clean_adv__(fits_file):
     data = fits_file[0].data[0, 0]
 
+    bmaj = fits_file[0].header['BMAJ']
+    bmin = fits_file[0].header['BMIN']
+    ra_inc = fits_file[0].header['CDELT1']
+    dec_inc = fits_file[0].header['CDELT2']
+    bpa = fits_file[0].header['BPA']
+    center = map_center(data)
+
+    data, popt = gauss_clean(data, center, bmin/dec_inc, bmaj/ra_inc, bpa)
+
+    return data
+gauss_clean_adv = np.vectorize(gauss_clean_adv__)
+
+def toFixed(numObj, digits=0):
+    return f"{numObj:.{digits}f}"
+
+def is_blamba_test(fits_file, name, axes=[], num=0):
+    data = fits_file[0].data[0, 0]
+    
     clean_up_np = np.vectorize(clean_up, otypes=[float])
-    noise_lvl = map_noise(data)
+    noise_lvl = np.abs(map_noise(data))
+    print('Noise =', noise_lvl)
+    print('Before: ', integrate_map(data))
     data_ = clean_up_np(data, noise_lvl, roughness=1, mode='default')
     clean_data = np.copy(data_)
 
@@ -654,24 +736,70 @@ def is_blamba(fits_file):
     dec_inc = fits_file[0].header['CDELT2']
     bpa = fits_file[0].header['BPA']
     center = map_center(data)
-
-    fig, (ax1, ax2) = plt.subplots(1, 2)
+    N = len(data)
+ 
+    #fig, (ax1, ax2) = plt.subplots(1, 2)
     #
     #np.savetxt('dat_p', data)
-    ax1.imshow(data, norm=colors.SymLogNorm(linthresh = np.abs(np.amin(data))), cmap='jet', origin = 'lower')
-    data = gauss_clean(data, center, bmin/dec_inc, bmaj/ra_inc, bpa)
-    np.savetxt('dat_a', data)
-    #data = np.loadtxt('dat_a')
-    ax2.imshow(data, norm=colors.SymLogNorm(linthresh = np.abs(np.amin(data))), cmap='jet', origin = 'lower')
+    
+    axes[0, num].imshow(data, norm=colors.SymLogNorm(linthresh = np.abs(np.amin(data))), cmap='jet', origin = 'lower')
+    #ax1.hist(data.rl(ave)/noise_lvl, bins=500)
+    #data, popt = gauss_clean(data, center, bmin/dec_inc, bmaj/ra_inc, bpa)
+    #np.savetxt('dat__' + str(num), data)
+    data = np.loadtxt('dat_' + str(num+3))
+    axes[1, num].imshow(data, norm=colors.SymLogNorm(linthresh = np.abs(np.amin(data))), cmap='jet', origin = 'lower')
+    axes[2, num].hist((data.ravel()/noise_lvl), bins=500)
+    #plt.savefig('/mnt/d/Source/rellab/algo/' + name + '_new.png', dpi = 300)
+    #print(asimmertry(data))
+    ratios = map_flux_ratio(data, noise_lvl, 3)
+    ann = 'asim = ' + str(toFixed(asimmertry(data), 4)) + '\n r1 = ' + str(toFixed(ratios[0], 4)) + '\n r1 = ' + str(toFixed(ratios[1], 4))
+    axes[2, num].set_title(ann, fontsize = 5)
+    axes[0, num].set_title('std = ' + str(noise_lvl), fontsize = 5)
+    #plt.show()
 
-    #x = np.linspace(0, 512, 100)
-    #y = []
-    #print(np.amax(data))
-    #for i in x:
-    #    y.append(twoD_gauss(i, center[1], np.amax(data), bmin/dec_inc * 1.2, bmaj/ra_inc * 1.2, center[0], center[1], bpa))
-    #ax2.scatter(x, y)
-    #ax2.scatter(np.arange(0, 512), data[np.arange(0, 512), center[1] ])
-    #ax.add_patch(Ellipse((+len(data)*0.1, +len(data)*0.1),  
-    #                4*bmin/dec_inc, 4*bmaj/ra_inc, fc = 'red', ec = 'black', lw = 1, angle = bpa))
-    plt.show()
+    Integral = integrate_map(data)
+    #Integral = np.std(data.ravel())
+    print(Integral, 3*noise_lvl )
+    if(Integral >= 3*(noise_lvl**2) *len(data)**2 ):
+        return 0
+    else:
+        return 1
+
+
+def diag_norm(fits_file, gcleaned_data, n):
+    bmaj = fits_file[0].header['BMAJ']
+    bmin = fits_file[0].header['BMIN']
+    ra_inc = fits_file[0].header['CDELT1']
+    dec_inc = fits_file[0].header['CDELT2']
+
+    norm = np.abs (bmaj * bmin / (dec_inc * ra_inc) )
+    #norm = np.abs (dec_inc * ra_inc)
+    sigma = map_noise(gcleaned_data)
+
+    return gcleaned_data[gcleaned_data>=n*sigma].size/norm
+
+def is_blamba(file):
+    fits_file = fits.open(file)
+    gc_data = gauss_clean_adv__(fits_file)
+
+    ratio = diag_norm(fits_file, gc_data, 5.5)
+    
+    if ratio > 2.65:
+        return 1
+    return 0
+    
+
+
+
+
+
+def find_maps(catalog):
+
+    maps = np.array([])
+    for folder in os.listdir(catalog):
+        for file in os.listdir(os.path.join(catalog, folder)):
+            if file.endswith('map.fits'):
+                maps = np.append(maps, os.path.join(catalog, folder, file))
+    
+    return maps
 

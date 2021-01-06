@@ -108,15 +108,17 @@ def plot(fits_file, trace=[[]], extra=[], data=[]):
 
     bmaj = float(fits_file[0].header['BMAJ'])*3600*1000
     bmin = float(fits_file[0].header['BMIN'])*3600*1000
+
+    bpa = float(fits_file[0].header['BPA'])
     
     fig, ax = plt.subplots()#num=None, figsize=(16, 12), dpi=80, facecolor='w', edgecolor='k')
     extent = [-center_pix[0]*(ra_inc), (len(data) - center_pix[0])*(ra_inc), 
                 -center_pix[1]*(dec_inc), (len(data) - center_pix[1])*(dec_inc)]
 
-    ax.imshow(data, norm=colors.LogNorm(), cmap='viridis', origin = 'lower', extent = extent)
-
+    #ax.imshow(data, norm=colors.LogNorm(), cmap='viridis', origin = 'lower', extent = extent)
+    ax.imshow(data, norm=colors.SymLogNorm(linthresh = np.abs(np.amin(data))), cmap='jet', origin = 'lower', extent = extent)
     levels1 = np.logspace(0, np.amax(data), num = 8, base = 2)
-    print(np.amin(data))
+    
     #ax.contour(data, -2, norm = colors.LogNorm())
     
 
@@ -135,7 +137,7 @@ def plot(fits_file, trace=[[]], extra=[], data=[]):
         plt.scatter(x = [ arr[0] * (extent[1]-extent[0]) / len(data) + extent[0] for arr in extra ], 
                 y = [ - arr[1] * (extent[2]-extent[3]) / len(data) + extent[2] for arr in extra ], c='green', marker = 'o')
 
-    ax.add_patch(Ellipse((-len(data)*0.9*0.5*(ra_inc), -len(data)*0.9*0.5*(dec_inc)), 2*bmin, 2*bmaj, fc = 'red', ec = 'black', lw = 1))
+    ax.add_patch(Ellipse((-len(data)*0.9*0.5*(ra_inc), -len(data)*0.9*0.5*(dec_inc)), 2*bmin, 2*bmaj, angle = -bpa,  fc = 'red', ec = 'black', lw = 1))
 
     ax.set_title(object_name)
     plt.show()
